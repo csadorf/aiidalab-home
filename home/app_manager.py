@@ -4,6 +4,7 @@
 import re
 from subprocess import CalledProcessError
 
+import packaging
 import traitlets
 import ipywidgets as ipw
 from jinja2 import Template
@@ -26,6 +27,8 @@ class VersionSelectorWidget(ipw.VBox):
 
     disabled = traitlets.Bool()
 
+    available_versions = traitlets.List(traitlets.Tuple(traitlets.Unicode(), traitlets.Unicode()))
+
     def __init__(self, *args, **kwargs):
         style = {'description_width': '100px'}
         self.version_to_install = ipw.Dropdown(
@@ -33,6 +36,13 @@ class VersionSelectorWidget(ipw.VBox):
             disabled=True,
             style=style,
         )
+        self.include_prereleases = ipw.Checkbox(
+            description='include prereleases',
+            value=False,
+            disabled=True,
+        )
+        self.versions = ipw.HBox(children=[self.version_to_install, self.include_prereleases])
+
         self.installed_version = ipw.Text(
             description='Installed version',
             disabled=True,
@@ -44,8 +54,10 @@ class VersionSelectorWidget(ipw.VBox):
             style=style,
         )
 
+        self.observe(self._refresh_available_versions, ('available_versions', ))
+
         super().__init__(
-            children=[self.installed_version, self.version_to_install, self.info],
+            children=[self.installed_version, self.versions, self.info],
             layout={'min_width': '300px'},
             *args,
             **kwargs,
@@ -54,6 +66,33 @@ class VersionSelectorWidget(ipw.VBox):
     @traitlets.observe('disabled')
     def _observe_disabled(self, change):
         self.version_to_install.disabled = change['new']
+
+    @staticmethod
+    def _is_prerelease(version):
+        return packaging.version.parse(version).is_prerelease
+
+    def _refresh_available_versions(self, change):
+        versions = change['new']
+        with self.hold_trait_notifications():
+            # Determine which versions are considered prereleases
+            prereleases = {version for fmt_version, version in versions if self._is_prerelease(fmt_version)}
+
+            # Check whether a prerelease is installed or whether there are only prereleases are available
+            prerelease_installed = self._is_prerelease(self.installed_version.value)
+            only_prereleases = len(versions) and len(prereleases) == len(versions)
+
+            # The ability to toggle inclusion of prereleases only enabled
+            # when there are prereleases are available and further only if the
+            # currently installed version is not a prerelease or there are only
+            # prereleases available for installation.
+            self.include_prereleases.disabled = prerelease_installed or only_prereleases or not len(prereleases)
+            self.include_prereleases.value = self.include_prereleases.value or prerelease_installed or only_prereleases
+
+            # Update the version selection widget with all versions, filtering
+            # prereleases if desired.
+            self.version_to_install.options = [
+                    (fmt_v, v) for fmt_v, v in versions
+                    if self.include_prereleases.value or v not in prereleases]
 
 
 class AppManagerWidget(ipw.VBox):
@@ -119,7 +158,7 @@ class AppManagerWidget(ipw.VBox):
         ]
 
         self.version_selector = VersionSelectorWidget()
-        ipw.dlink((self.app, 'available_versions'), (self.version_selector.version_to_install, 'options'),
+        ipw.dlink((self.app, 'available_versions'), (self.version_selector, 'available_versions'),
                   transform=lambda versions: [(self._formatted_version(version), version) for version in versions])
         ipw.dlink((self.app, 'installed_version'), (self.version_selector.installed_version, 'value'),
                   transform=self._formatted_version)
@@ -228,7 +267,7 @@ class AppManagerWidget(ipw.VBox):
                 self.update_button.tooltip = '' if can_update and not detached else tooltip_danger if can_update else ''
 
             # Update the version_selector widget state.
-            more_than_one_version = len(self.version_selector.version_to_install.options) > 1
+            more_than_one_version = len(self.version_selector.available_versions) > 1
             self.version_selector.disabled = busy or blocked_install or not more_than_one_version
 
             # Indicate whether there are local modifications and present option for user override.
